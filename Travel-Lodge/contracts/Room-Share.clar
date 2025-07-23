@@ -22,6 +22,8 @@
 (define-constant ERR_DISPUTE_WINDOW_EXPIRED (err u110))
 (define-constant ERR_INSUFFICIENT_STAKE (err u111))
 (define-constant ERR_PROPERTY_ALREADY_EXISTS (err u112))
+(define-constant ERR_INVALID_INPUT (err u113))
+(define-constant ERR_INVALID_AMOUNT (err u114))
 
 ;; Data Variables
 (define-data-var next-property-id uint u1)
@@ -155,11 +157,51 @@
   )
 )
 
+;; Input validation functions
+(define-private (validate-string-input (input (string-ascii 500)))
+  (> (len input) u0)
+)
+
+(define-private (validate-short-string-input (input (string-ascii 100)))
+  (> (len input) u0)
+)
+
+(define-private (validate-username (username (string-ascii 50)))
+  (and (> (len username) u2) (<= (len username) u50))
+)
+
+(define-private (validate-email (email (string-ascii 100)))
+  (and (> (len email) u5) (<= (len email) u100))
+)
+
+(define-private (validate-uint-positive (value uint))
+  (> value u0)
+)
+
+(define-private (validate-property-id (property-id uint))
+  (and (> property-id u0) (< property-id (var-get next-property-id)))
+)
+
+(define-private (validate-booking-id (booking-id uint))
+  (and (> booking-id u0) (< booking-id (var-get next-booking-id)))
+)
+
+(define-private (validate-amenity-item (amenity (string-ascii 50)))
+  (and (> (len amenity) u0) (<= (len amenity) u50))
+)
+
+(define-private (validate-amenities (amenities (list 10 (string-ascii 50))))
+  (let ((validated-list (filter validate-amenity-item amenities)))
+    (is-eq (len validated-list) (len amenities))
+  )
+)
+
 ;; Public Functions
 
 ;; Host Functions
 (define-public (stake-as-host (amount uint))
   (let ((current-stake (default-to u0 (get amount (map-get? host-stakes { host: tx-sender })))))
+    (asserts! (validate-uint-positive amount) ERR_INVALID_INPUT)
     (asserts! (>= amount MIN_STAKE) ERR_INSUFFICIENT_STAKE)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
     (map-set host-stakes
@@ -180,6 +222,15 @@
 )
   (let ((property-id (var-get next-property-id))
         (host-stake (get amount (map-get? host-stakes { host: tx-sender }))))
+    ;; Input validation
+    (asserts! (validate-short-string-input title) ERR_INVALID_INPUT)
+    (asserts! (validate-string-input description) ERR_INVALID_INPUT)
+    (asserts! (validate-short-string-input location) ERR_INVALID_INPUT)
+    (asserts! (validate-uint-positive price-per-night) ERR_INVALID_INPUT)
+    (asserts! (validate-uint-positive max-guests) ERR_INVALID_INPUT)
+    (asserts! (<= max-guests u20) ERR_INVALID_INPUT) ;; Reasonable max guest limit
+    (asserts! (validate-amenities amenities) ERR_INVALID_INPUT)
+    
     (asserts! (>= (default-to u0 host-stake) MIN_STAKE) ERR_INSUFFICIENT_STAKE)
     (asserts! (is-none (map-get? properties { property-id: property-id })) ERR_PROPERTY_ALREADY_EXISTS)
     
@@ -208,6 +259,7 @@
 
 (define-public (update-property-status (property-id uint) (is-active bool))
   (let ((property (unwrap! (map-get? properties { property-id: property-id }) ERR_PROPERTY_NOT_FOUND)))
+    (asserts! (validate-property-id property-id) ERR_INVALID_INPUT)
     (asserts! (is-eq (get host property) tx-sender) ERR_NOT_AUTHORIZED)
     
     (map-set properties
@@ -233,6 +285,12 @@
     (platform-fee (calculate-platform-fee total-amount))
     (host-amount (- total-amount platform-fee))
   )
+    ;; Input validation
+    (asserts! (validate-property-id property-id) ERR_INVALID_INPUT)
+    (asserts! (validate-uint-positive check-in) ERR_INVALID_INPUT)
+    (asserts! (validate-uint-positive check-out) ERR_INVALID_INPUT)
+    (asserts! (validate-uint-positive total-guests) ERR_INVALID_INPUT)
+    
     (asserts! (get is-active property) ERR_PROPERTY_NOT_AVAILABLE)
     (asserts! (> check-out check-in) ERR_INVALID_DATES)
     (asserts! (<= total-guests (get max-guests property)) ERR_INVALID_DATES)
@@ -281,6 +339,7 @@
 
 (define-public (cancel-booking (booking-id uint))
   (let ((booking (unwrap! (map-get? bookings { booking-id: booking-id }) ERR_BOOKING_NOT_FOUND)))
+    (asserts! (validate-booking-id booking-id) ERR_INVALID_INPUT)
     (asserts! (is-eq (get guest booking) tx-sender) ERR_NOT_AUTHORIZED)
     (asserts! (is-eq (get status booking) "pending") ERR_NOT_AUTHORIZED)
     (asserts! (< block-height (+ (get created-at booking) CANCELLATION_WINDOW)) ERR_CANCELLATION_WINDOW_EXPIRED)
@@ -315,6 +374,7 @@
 ;; Host confirmation
 (define-public (confirm-booking (booking-id uint))
   (let ((booking (unwrap! (map-get? bookings { booking-id: booking-id }) ERR_BOOKING_NOT_FOUND)))
+    (asserts! (validate-booking-id booking-id) ERR_INVALID_INPUT)
     (asserts! (is-eq (get host booking) tx-sender) ERR_NOT_AUTHORIZED)
     (asserts! (is-eq (get status booking) "pending") ERR_NOT_AUTHORIZED)
     
@@ -350,9 +410,13 @@
 ;; Review System
 (define-public (submit-review (booking-id uint) (rating uint) (comment (string-ascii 500)))
   (let ((booking (unwrap! (map-get? bookings { booking-id: booking-id }) ERR_BOOKING_NOT_FOUND)))
+    ;; Input validation
+    (asserts! (validate-booking-id booking-id) ERR_INVALID_INPUT)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR_INVALID_RATING)
+    (asserts! (validate-string-input comment) ERR_INVALID_INPUT)
+    
     (asserts! (or (is-eq (get guest booking) tx-sender) (is-eq (get host booking) tx-sender)) ERR_NOT_AUTHORIZED)
     (asserts! (is-eq (get status booking) "completed") ERR_NOT_AUTHORIZED)
-    (asserts! (and (>= rating u1) (<= rating u5)) ERR_INVALID_RATING)
     (asserts! (is-none (map-get? reviews { booking-id: booking-id })) ERR_ALREADY_REVIEWED)
     
     (map-set reviews
@@ -383,6 +447,10 @@
 ;; Dispute System
 (define-public (initiate-dispute (booking-id uint) (reason (string-ascii 500)))
   (let ((booking (unwrap! (map-get? bookings { booking-id: booking-id }) ERR_BOOKING_NOT_FOUND)))
+    ;; Input validation
+    (asserts! (validate-booking-id booking-id) ERR_INVALID_INPUT)
+    (asserts! (validate-string-input reason) ERR_INVALID_INPUT)
+    
     (asserts! (or (is-eq (get guest booking) tx-sender) (is-eq (get host booking) tx-sender)) ERR_NOT_AUTHORIZED)
     (asserts! (< block-height (+ (get check-out booking) DISPUTE_WINDOW)) ERR_DISPUTE_WINDOW_EXPIRED)
     
@@ -410,6 +478,10 @@
 ;; Profile Management
 (define-public (create-profile (username (string-ascii 50)) (email (string-ascii 100)))
   (begin
+    ;; Input validation
+    (asserts! (validate-username username) ERR_INVALID_INPUT)
+    (asserts! (validate-email email) ERR_INVALID_INPUT)
+    
     (map-set user-profiles
       { user: tx-sender }
       {
@@ -430,6 +502,9 @@
 (define-public (resolve-dispute (booking-id uint) (resolution (string-ascii 20)))
   (begin
     (asserts! (is-contract-owner) ERR_NOT_AUTHORIZED)
+    (asserts! (validate-booking-id booking-id) ERR_INVALID_INPUT)
+    (asserts! (> (len resolution) u0) ERR_INVALID_INPUT)
+    
     (let ((dispute (unwrap! (map-get? disputes { booking-id: booking-id }) ERR_BOOKING_NOT_FOUND)))
       (map-set disputes
         { booking-id: booking-id }
@@ -446,6 +521,7 @@
 (define-public (withdraw-platform-fees (amount uint))
   (begin
     (asserts! (is-contract-owner) ERR_NOT_AUTHORIZED)
+    (asserts! (validate-uint-positive amount) ERR_INVALID_AMOUNT)
     (asserts! (<= amount (var-get platform-balance)) ERR_INSUFFICIENT_PAYMENT)
     
     (try! (as-contract (stx-transfer? amount tx-sender CONTRACT_OWNER)))
